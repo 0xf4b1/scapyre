@@ -5,6 +5,8 @@ from time import sleep
 from scapy.layers.inet import *
 from netfilterqueue import NetfilterQueue
 
+from ProxySniffer import ProxySniffer
+
 
 class Scapyre:
     # list of packet's checksums that are expected by the host
@@ -32,7 +34,7 @@ class Scapyre:
         mapping=None,
         buffer_size=10000,
         respect_packet_deltas=True,
-        proxy_implementation="nfqueue",
+        proxy_implementation=ProxySniffer,
     ):
         self.ip = ip
         self.pcap = pcap
@@ -40,7 +42,7 @@ class Scapyre:
         self.mapping = mapping
         self.packet_buffer = Queue.Queue(maxsize=buffer_size)
         self.respect_packet_deltas = respect_packet_deltas
-        self.proxy_implementation = proxy_implementation
+        self.proxy_implementation = proxy_implementation(self)
 
     def start(self):
         """Call this method to start the replay, it will setup all the threads and configuration for
@@ -48,7 +50,7 @@ class Scapyre:
         print("Start proxy thread ...")
         # Runs in its own thread because nfqueue continuously listens for incoming packets and blocks.
         # Checksums of the received packets will be stored in a queue to verify if they were received
-        proxy_thread = threading.Thread(target=self.start_proxy)
+        proxy_thread = threading.Thread(target=self.proxy_implementation.start)
         proxy_thread.daemon = True
         proxy_thread.start()
 
@@ -59,8 +61,6 @@ class Scapyre:
         buffer_thread = threading.Thread(target=self.start_buffer)
         buffer_thread.daemon = True
         buffer_thread.start()
-
-        raw_input("Press enter to start replay")
 
         print("Start replay thread ...")
         # Replay thread processes the packets from the queue in sequence
@@ -74,9 +74,7 @@ class Scapyre:
                 sleep(1)
             except KeyboardInterrupt:
                 print("closing ...")
-                print("Flushing iptables.")
-                os.system("iptables -F")
-                os.system("iptables -X")
+                self.proxy_implementation.stop()
                 exit(0)
 
     def start_buffer(self):
@@ -96,40 +94,6 @@ class Scapyre:
 
         self.pcap_ended = True
         print("No more packets in pcap file, buffer thread terminating!")
-
-    def start_proxy(self):
-        """Starts the proxy to intercept incoming packets"""
-        if self.proxy_implementation == "nfqueue":
-            # Starts the netfilter queue, the nfqueue.run() method listens for
-            # incoming packets and calls the callback method and blocks
-            print("Using nfqueue")
-            # Sets up nfqueue so that packets will first put in a queue to process them
-            # here before they are processed by the OS when accepted
-            os.system(
-                "iptables -A INPUT -i " + self.iface + " -j NFQUEUE --queue-num 1"
-            )
-            nfqueue = NetfilterQueue()
-            nfqueue.bind(1, self.callback_nfqueue)  # mode=2
-            nfqueue.run()
-        elif self.proxy_implementation == "sniff":
-            # Starts sniffing on the interface, the sniff method blocks and continuously
-            # calls the callback method on new packets
-            print("Using sniffer")
-            sniff(iface=self.iface, prn=self.callback)
-        else:
-            print("Invalid proxy implementation")
-            exit(1)
-
-    def callback_nfqueue(self, pkt):
-        """Callback method for the nfqueue implementation that uses the default callback
-        and additionally accepts or drops packets"""
-        packet = IP(pkt.get_payload())
-        if self.callback(packet):
-            # packet is related to the replay, drop it here so that it will not further processed by the OS
-            pkt.drop()
-        else:
-            # the packet is not part of the replay, accept it so that it will treated normally
-            pkt.accept()
 
     def callback(self, packet):
         """Packet callback method to process a received packet and decide whether it is related to the replay or not"""
@@ -184,7 +148,7 @@ class Scapyre:
                     )
                 # host is source and sends the current packet to dest
                 if self.is_related_src(packet):
-                    print("Sending packet")
+                    print("Sending packet: src=" + src + ", dst=" + dst)
                     # if option is enabled respect the time between packets
                     if self.respect_packet_deltas and self.last_packet_time is not None:
                         delta = packet.time - self.last_packet_time
@@ -196,7 +160,7 @@ class Scapyre:
                     self.last_packet_time = packet.time
                 # host is destination and waits for the current packet from source
                 elif self.is_related_dest(packet):
-                    print("Waiting for packet")
+                    print("Waiting for packet: src=" + src + ", dst=" + dst)
                     # wait for the queue to come up
                     while src not in self.received_packets_queue:
                         sleep(1 / 1000)  # sleep 1ms
