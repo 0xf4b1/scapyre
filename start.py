@@ -1,21 +1,28 @@
+import argparse
+import json
+
 from scapyre import Scapyre
 
-# cofiguration and startup file
 
-# the pcap file for the replay
-pcap = 'some-pcap-file.pcap'
+parser = argparse.ArgumentParser(description='Scapyre')
 
-# Host IP from the pcap file that is handled by this host
-ip = 'default'
+parser.add_argument('pcap', type=str,
+                    help='PCAP file to replay')
 
-# the host interface that will be used
-iface = 'eth0'
+parser.add_argument('iface', type=str,
+                    help='Interface that will be used for the replay')
 
-# mapping of host IP in the pcap file -> host IP in the replay environment.
-# it is possible that one host handles the packets of multiple hosts in the pcap file.
-# Mapping 'default' to one host means it handles all the traffic from hosts that were not mapped
-mapping = {'192.168.1.114': '192.168.1.1', '158.69.209.193': '192.168.2.1', 'default': '192.168.100.1'}
+parser.add_argument('ip', type=str,
+                    help='IP address of a host in the PCAP that will be replayed by this host')
+
+parser.add_argument('--mapping', type=json.loads, default=None,
+                    help='Remapping of host IPs in the PCAP and actual host IPs in the replay environment')
+
+parser.add_argument('--enable-deltas', dest='deltas', default=False, action='store_true',
+                    help='Respect deltas between two packets')
+
+args = parser.parse_args()
 
 # Create instance of the replay, respect_delays true cares about the intermediate packet deltas
-replay = Scapyre(ip, pcap, iface, mapping=mapping, respect_packet_deltas=False)
+replay = Scapyre(args.ip, args.pcap, args.iface, mapping=args.mapping, respect_packet_deltas=args.deltas)
 replay.start()
