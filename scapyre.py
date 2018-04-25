@@ -10,7 +10,7 @@ from ProxySniffer import ProxySniffer
 
 class Scapyre:
     # list of packet's checksums that are expected by the host
-    expected_packets = set()
+    expected_packets = []
 
     # queues of received packets mapped by sender host IP
     received_packets_queue = {}
@@ -32,7 +32,7 @@ class Scapyre:
         pcap,
         iface,
         mapping=None,
-        buffer_size=10000,
+        buffer_size=1000,
         respect_packet_deltas=True,
         proxy_implementation=ProxySniffer,
     ):
@@ -85,41 +85,45 @@ class Scapyre:
                 packet = pcap_reader.read_packet()
                 if packet is None:
                     break
-                if self.has_layer(packet):
+                if has_layer(packet):
                     if self.is_related(packet):
                         self.packet_buffer.put(packet)
-                    if self.is_related_dest(packet):
-                        layer = self.get_layer(packet)
-                        self.expected_packets.add(layer.chksum)
+                    if self.is_related_dst(packet):
+                        self.expected_packets.append(
+                            PacketMetadata(packet, self.mapping)
+                        )
 
         self.pcap_ended = True
         print("No more packets in pcap file, buffer thread terminating!")
 
     def callback(self, packet):
         """Packet callback method to process a received packet and decide whether it is related to the replay or not"""
-        if self.has_layer(packet):
-            layer = self.get_layer(packet)
-            if layer.chksum in self.expected_packets:
-                print("related: " + str(layer.chksum))
-                # TODO this causes problems
-                # expected packet treated as unexpected with removal
-                # probably it is because of packets having same chksum (identical packets, or also different)
-                # without removal there is a lot of wasted memory
-                # self.expected_packets.remove(layer.chksum)
-
+        if has_layer(packet):
+            layer = get_layer(packet)
+            if self.is_expected(packet):
                 # put it in the received packet queue that will be processed in the handle packet thread
                 ip_layer = packet.getlayer(IP)
                 if ip_layer.src not in self.received_packets_queue:
-                    self.received_packets_queue[ip_layer.src] = Queue.Queue()
-                self.received_packets_queue[ip_layer.src].put(layer.chksum)
+                    self.received_packets_queue[ip_layer.src] = []
+                self.received_packets_queue[ip_layer.src].append(layer.chksum)
                 return True
             print("not related: " + str(layer.chksum))
+        return False
+
+    def is_expected(self, packet):
+        ip = self.map(self.ip)
+        if packet.getlayer(IP).dst != ip:
+            return False
+        metadata = PacketMetadata(packet)
+        if metadata in self.expected_packets:
+            self.expected_packets.remove(metadata)
+            return True
         return False
 
     def start_replay(self):
         """Starts the main replay where the packets from the buffer are processed in sequence"""
         s = conf.L2socket(iface=self.iface)
-        i = 0
+        i = 1
         while True:
             # replay done
             if self.packet_buffer.empty() and self.pcap_ended:
@@ -127,25 +131,14 @@ class Scapyre:
             print("Packet #" + str(i))
             # get next packet from queue, blocks when queue is empty
             packet = self.packet_buffer.get()
-            if self.has_layer(packet):
-                layer = self.get_layer(packet)
+            if has_layer(packet):
+                layer = get_layer(packet)
                 print(packet.summary())
                 print("chksum: " + str(layer.chksum))
                 print("size: " + str(len(packet)))
                 ip_layer = packet.getlayer(IP)
-                src = ip_layer.src
-                dst = ip_layer.dst
-                if self.mapping is not None:
-                    src = (
-                        self.mapping[src]
-                        if src in self.mapping
-                        else self.mapping["default"]
-                    )
-                    dst = (
-                        self.mapping[dst]
-                        if dst in self.mapping
-                        else self.mapping["default"]
-                    )
+                src = self.map(ip_layer.src)
+                dst = self.map(ip_layer.dst)
                 # host is source and sends the current packet to dest
                 if self.is_related_src(packet):
                     print("Sending packet: src=" + src + ", dst=" + dst)
@@ -159,19 +152,15 @@ class Scapyre:
                     s.send(Ether() / IP(src=src, dst=dst) / layer)
                     self.last_packet_time = packet.time
                 # host is destination and waits for the current packet from source
-                elif self.is_related_dest(packet):
+                elif self.is_related_dst(packet):
                     print("Waiting for packet: src=" + src + ", dst=" + dst)
                     # wait for the queue to come up
                     while src not in self.received_packets_queue:
-                        sleep(1 / 1000)  # sleep 1ms
+                        sleep(0.1)  # sleep 100ms
                     # gets the next received packet and blocks when empty
-                    recv_chksum = self.received_packets_queue[src].get()
-                    # compare checksums
-                    if layer.chksum != recv_chksum:
-                        print("packets out of order!")
-                        print("expected chksum: " + str(layer.chksum))
-                        print("received chksum: " + str(recv_chksum))
-                        exit(1)
+                    while layer.chksum not in self.received_packets_queue[src]:
+                        sleep(0.1)
+                    self.received_packets_queue[src].remove(layer.chksum)
                     self.last_packet_time = packet.time
                 # host is not related to current packet, ignore it
                 else:
@@ -180,21 +169,8 @@ class Scapyre:
 
         print("No more packets, replay done! :)")
 
-    def has_layer(self, packet):
-        return packet.haslayer(IP) and (
-            packet.haslayer(TCP) or packet.haslayer(UDP) or packet.haslayer(ICMP)
-        )
-
-    def get_layer(self, packet):
-        if packet.haslayer(TCP):
-            return packet.getlayer(TCP)
-        elif packet.haslayer(UDP):
-            return packet.getlayer(UDP)
-        elif packet.haslayer(ICMP):
-            return packet.getlayer(ICMP)
-
     def is_related(self, packet):
-        return self.is_related_src(packet) or self.is_related_dest(packet)
+        return self.is_related_src(packet) or self.is_related_dst(packet)
 
     def is_related_src(self, packet):
         ip_layer = packet.getlayer(IP)
@@ -204,10 +180,65 @@ class Scapyre:
             and self.ip == "default"
         )
 
-    def is_related_dest(self, packet):
+    def is_related_dst(self, packet):
         ip_layer = packet.getlayer(IP)
         return ip_layer.dst == self.ip or (
             self.mapping is not None
             and ip_layer.dst not in self.mapping
             and self.ip == "default"
         )
+
+    def map(self, ip):
+        return map(ip, self.mapping)
+
+
+class PacketMetadata:
+    src = None
+    dst = None
+    sport = None
+    dport = None
+    proto = None
+    chksum = None
+
+    def __init__(self, packet, mapping=None):
+        self.src = map(packet.getlayer(IP).src, mapping)
+        self.dst = map(packet.getlayer(IP).dst, mapping)
+        self.sport = get_layer(packet).sport
+        self.dport = get_layer(packet).dport
+        self.proto = packet.payload.proto
+        self.chksum = get_layer(packet).chksum
+
+    def __eq__(self, other):
+        if isinstance(self, other.__class__):
+            return self.__dict__ == other.__dict__
+        return NotImplemented
+
+    def __ne__(self, other):
+        x = self.__eq__(other)
+        if x is not NotImplemented:
+            return not x
+        return NotImplemented
+
+    def __hash__(self):
+        return hash(tuple(sorted(self.__dict__.items())))
+
+
+def get_layer(packet):
+    if packet.haslayer(TCP):
+        return packet.getlayer(TCP)
+    elif packet.haslayer(UDP):
+        return packet.getlayer(UDP)
+    elif packet.haslayer(ICMP):
+        return packet.getlayer(ICMP)
+
+
+def has_layer(packet):
+    return packet.haslayer(IP) and (
+        packet.haslayer(TCP) or packet.haslayer(UDP) or packet.haslayer(ICMP)
+    )
+
+
+def map(ip, mapping=None):
+    if mapping is None:
+        return ip
+    return mapping[ip] if ip in mapping else mapping["default"]
