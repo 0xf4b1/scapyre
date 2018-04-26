@@ -29,7 +29,7 @@ Building a Docker container that contains the replay tool
 
 Running the docker container
 
-`docker run -it --network <docker network> --ip <container ip> scapyre <replay params>`
+`docker run -it -v <pcap directory>:/data --network <docker network> --ip <container ip> scapyre <replay params>`
 
 Create docker network for replay
 
