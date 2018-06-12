@@ -1,5 +1,6 @@
 import Queue
 import threading
+import logging
 
 from time import sleep
 from scapy.layers.inet import *
@@ -23,9 +24,6 @@ class Scapyre:
     # to that the replay can successfully terminate
     pcap_ended = False
 
-    # last packet time to calculate delta with follow up packet
-    last_packet_time = None
-
     def __init__(
         self,
         ip,
@@ -35,7 +33,15 @@ class Scapyre:
         buffer_size=1000,
         respect_packet_deltas=True,
         proxy_implementation=ProxySniffer,
+        logfile="replay.log",
     ):
+        logging.basicConfig(
+            format="%(asctime)s %(levelname)-8s %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+            filename=logfile,
+            filemode="w",
+            level=logging.DEBUG,
+        )
         self.ip = ip
         self.pcap = pcap
         self.iface = iface
@@ -47,14 +53,14 @@ class Scapyre:
     def start(self):
         """Call this method to start the replay, it will setup all the threads and configuration for
         the replay and ask to hit return to start to process the first packet"""
-        print("Start proxy thread ...")
+        logging.info("Start proxy thread ...")
         # Runs in its own thread because nfqueue continuously listens for incoming packets and blocks.
         # Checksums of the received packets will be stored in a queue to verify if they were received
         proxy_thread = threading.Thread(target=self.proxy_implementation.start)
         proxy_thread.daemon = True
         proxy_thread.start()
 
-        print("Start packet buffer thread ...")
+        logging.info("Start packet buffer thread ...")
         # Buffer runs in another thread to read packets from the pcap file.
         # The packets need to be buffered to determine for incoming packets if they belong to the replay.
         # The buffered packets are stored in a queue so that they can processed in sequence.
@@ -62,7 +68,7 @@ class Scapyre:
         buffer_thread.daemon = True
         buffer_thread.start()
 
-        print("Start replay thread ...")
+        logging.info("Start replay thread ...")
         # Replay thread processes the packets from the queue in sequence
         replay_thread = threading.Thread(target=self.start_replay)
         replay_thread.daemon = True
@@ -73,9 +79,12 @@ class Scapyre:
             try:
                 sleep(1)
             except KeyboardInterrupt:
-                print("closing ...")
-                self.proxy_implementation.stop()
-                exit(0)
+                self.stop()
+
+    def stop(self):
+        logging.info("closing ...")
+        self.proxy_implementation.stop()
+        exit(0)
 
     def start_buffer(self):
         """Reads new packets from the pcap file while the buffer is not full"""
@@ -94,7 +103,9 @@ class Scapyre:
                         )
 
         self.pcap_ended = True
-        print("No more packets in pcap file, buffer thread terminating!")
+        logging.info("No more packets in pcap file, buffer thread terminating!")
+        if self.packet_buffer.empty():
+            self.stop()
 
     def callback(self, packet):
         """Packet callback method to process a received packet and decide whether it is related to the replay or not"""
@@ -107,7 +118,7 @@ class Scapyre:
                     self.received_packets_queue[ip_layer.src] = []
                 self.received_packets_queue[ip_layer.src].append(layer.chksum)
                 return True
-            print("not related: " + str(layer.chksum))
+            logging.debug("not related: " + str(layer.chksum))
         return False
 
     def is_expected(self, packet):
@@ -122,38 +133,44 @@ class Scapyre:
 
     def start_replay(self):
         """Starts the main replay where the packets from the buffer are processed in sequence"""
+        start_time = time.time()
+        logging.info("start time: " + str(start_time))
         s = conf.L2socket(iface=self.iface)
         i = 1
         while True:
             # replay done
             if self.packet_buffer.empty() and self.pcap_ended:
                 break
-            print("Packet #" + str(i))
             # get next packet from queue, blocks when queue is empty
             packet = self.packet_buffer.get()
+            logging.info("Packet #" + str(i))
             if has_layer(packet):
                 layer = get_layer(packet)
-                print(packet.summary())
-                print("chksum: " + str(layer.chksum))
-                print("size: " + str(len(packet)))
+                logging.info(
+                    f"{packet.summary()}, chksum: {str(layer.chksum)}, size: {str(len(packet))}, time: {str(packet.time)}"
+                )
                 ip_layer = packet.getlayer(IP)
                 src = self.map(ip_layer.src)
                 dst = self.map(ip_layer.dst)
+
+                delta = packet.time - (time.time() - start_time)
+                logging.info("delta: " + str(delta))
+
                 # host is source and sends the current packet to dest
                 if self.is_related_src(packet):
-                    print("Sending packet: src=" + src + ", dst=" + dst)
+                    logging.info("Sending packet: src=" + src + ", dst=" + dst)
                     # if option is enabled respect the time between packets
-                    if self.respect_packet_deltas and self.last_packet_time is not None:
-                        delta = packet.time - self.last_packet_time
-                        print("delta: " + str(delta))
-                        sleep(delta)
+                    if self.respect_packet_deltas:
+                        if delta > 0:
+                            sleep(delta)
                     # craft next packet with replacement of L2/L3 (the IPs and MACs according to
                     # host mapping) and send it
                     s.send(Ether() / IP(src=src, dst=dst) / layer)
-                    self.last_packet_time = packet.time
                 # host is destination and waits for the current packet from source
                 elif self.is_related_dst(packet):
-                    print("Waiting for packet: src=" + src + ", dst=" + dst)
+                    logging.info(
+                        f"Waiting for packet: src: {src}, dst: {dst}, expected at: {time.strftime('%H:%M:%S', time.gmtime(time.time() + delta))}"
+                    )
                     # wait for the queue to come up
                     while src not in self.received_packets_queue:
                         sleep(0.1)  # sleep 100ms
@@ -161,13 +178,13 @@ class Scapyre:
                     while layer.chksum not in self.received_packets_queue[src]:
                         sleep(0.1)
                     self.received_packets_queue[src].remove(layer.chksum)
-                    self.last_packet_time = packet.time
                 # host is not related to current packet, ignore it
                 else:
-                    print("Not related to packet, ignoring.")
+                    logging.warning("Not related to packet, ignoring.")
             i += 1
 
-        print("No more packets, replay done! :)")
+        logging.info("No more packets, replay done! :)")
+        self.stop()
 
     def is_related(self, packet):
         return self.is_related_src(packet) or self.is_related_dst(packet)
