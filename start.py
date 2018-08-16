@@ -34,7 +34,16 @@ parser.add_argument(
 )
 
 parser.add_argument(
+    "--start-delayed",
+    type=float,
+    dest="delay",
+    default=0.0,
+    help="Wait time in seconds till the replay should start",
+)
+
+parser.add_argument(
     "--logfile",
+    type=str,
     dest="logfile",
     default="replay.log",
     help="File to store the logs of the replay",
@@ -49,6 +58,7 @@ replay = Scapyre(
     args.iface,
     mapping=args.mapping,
     respect_packet_deltas=args.deltas,
+    delay=args.delay,
     logfile=args.logfile,
 )
 replay.start()

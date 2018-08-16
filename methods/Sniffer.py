@@ -1,7 +1,7 @@
 from scapy.layers.inet import *
 
 
-class ProxySniffer:
+class Sniffer:
     def __init__(self, instance):
         self.instance = instance
         pass

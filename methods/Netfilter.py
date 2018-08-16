@@ -3,7 +3,7 @@ from netfilterqueue import NetfilterQueue
 from scapy.layers.inet import *
 
 
-class ProxyNetfilter:
+class Netfilter:
     def __init__(self, instance):
         self.instance = instance
         pass

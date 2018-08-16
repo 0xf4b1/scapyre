@@ -6,7 +6,7 @@ from time import sleep
 from scapy.layers.inet import *
 from netfilterqueue import NetfilterQueue
 
-from ProxySniffer import ProxySniffer
+from methods import Sniffer
 
 
 class Scapyre:
@@ -30,9 +30,10 @@ class Scapyre:
         pcap,
         iface,
         mapping=None,
-        buffer_size=1000,
+        buffer_size=10000,
         respect_packet_deltas=True,
-        proxy_implementation=ProxySniffer,
+        proxy_implementation=Sniffer,
+        delay=0.0,
         logfile="replay.log",
     ):
         logging.basicConfig(
@@ -48,6 +49,7 @@ class Scapyre:
         self.mapping = mapping
         self.packet_buffer = Queue.Queue(maxsize=buffer_size)
         self.respect_packet_deltas = respect_packet_deltas
+        self.delay = delay
         self.proxy_implementation = proxy_implementation(self)
 
     def start(self):
@@ -133,6 +135,9 @@ class Scapyre:
 
     def start_replay(self):
         """Starts the main replay where the packets from the buffer are processed in sequence"""
+        if self.delay > 0:
+            logging.info("delayed start, waiting for: " + str(self.delay))
+            sleep(self.delay)
         start_time = time.time()
         logging.info("start time: " + str(start_time))
         s = conf.L2socket(iface=self.iface)
@@ -153,18 +158,17 @@ class Scapyre:
                 src = self.map(ip_layer.src)
                 dst = self.map(ip_layer.dst)
 
-                delta = packet.time - (time.time() - start_time)
+                delta = packet.time + self.delay - (time.time() - start_time)
                 logging.info("delta: " + str(delta))
 
                 # host is source and sends the current packet to dest
                 if self.is_related_src(packet):
-                    logging.info("Sending packet: src=" + src + ", dst=" + dst)
                     # if option is enabled respect the time between packets
                     if self.respect_packet_deltas:
                         if delta > 0:
                             sleep(delta)
-                    # craft next packet with replacement of L2/L3 (the IPs and MACs according to
-                    # host mapping) and send it
+                    # craft next packet with replacement of L2/L3 (the IPs and MACs according to host mapping) and send it
+                    logging.info(f"Sending packet: src: {src}, dst: {dst}")
                     s.send(Ether() / IP(src=src, dst=dst) / layer)
                 # host is destination and waits for the current packet from source
                 elif self.is_related_dst(packet):
