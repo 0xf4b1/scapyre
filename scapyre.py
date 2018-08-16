@@ -224,8 +224,10 @@ class PacketMetadata:
     def __init__(self, packet, mapping=None):
         self.src = map(packet.getlayer(IP).src, mapping)
         self.dst = map(packet.getlayer(IP).dst, mapping)
-        self.sport = get_layer(packet).sport
-        self.dport = get_layer(packet).dport
+        layer = get_layer(packet)
+        if type(layer) is not ICMP:
+            self.sport = get_layer(packet).sport
+            self.dport = get_layer(packet).dport
         self.proto = packet.payload.proto
         self.chksum = get_layer(packet).chksum
 
