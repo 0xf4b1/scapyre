@@ -1,12 +1,68 @@
+import argparse
+import json
+import logging
+import os
 import Queue
 import threading
-import logging
 
-from time import sleep
-from scapy.layers.inet import *
+from time import sleep, time, gmtime, strftime
+
+from scapy.layers.inet import IP, conf, Ether, ICMP, TCP, UDP, sniff
+from scapy.utils import PcapReader
 from netfilterqueue import NetfilterQueue
 
-from methods import Sniffer
+
+class Sniffer:
+    def __init__(self, instance):
+        self.instance = instance
+        pass
+
+    def start(self):
+        """Starts the proxy to intercept incoming packets"""
+        print("Using sniffer")
+        sniff(iface=self.instance.iface, prn=self.callback_sniffer)
+
+    def callback_sniffer(self, pkt):
+        self.instance.callback(pkt)
+
+    def stop(self):
+        pass
+
+
+class Netfilter:
+    def __init__(self, instance):
+        self.instance = instance
+        pass
+
+    def start(self):
+        """Starts the proxy to intercept incoming packets"""
+        # Starts the netfilter queue, the nfqueue.run() method listens for
+        # incoming packets and calls the callback method and blocks
+        print("Using nfqueue")
+        # Sets up nfqueue so that packets will first put in a queue to process them
+        # here before they are processed by the OS when accepted
+        os.system(
+            "iptables -A INPUT -i " + self.instance.iface + " -j NFQUEUE --queue-num 1"
+        )
+        nfqueue = NetfilterQueue()
+        nfqueue.bind(1, self.callback_nfqueue)
+        nfqueue.run()
+
+    def callback_nfqueue(self, pkt):
+        """Callback method for the nfqueue implementation that uses the default callback
+        and additionally accepts or drops packets"""
+        packet = IP(pkt.get_payload())
+        if self.instance.callback(packet):
+            # packet is related to the replay, drop it here so that it will not further processed by the OS
+            pkt.drop()
+        else:
+            # the packet is not part of the replay, accept it so that it will treated normally
+            pkt.accept()
+
+    def stop(self):
+        print("Flushing iptables.")
+        os.system("iptables -F")
+        os.system("iptables -X")
 
 
 class Scapyre:
@@ -39,10 +95,9 @@ class Scapyre:
         logging.basicConfig(
             format="%(asctime)s %(levelname)-8s %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
-            filename=logfile,
-            filemode="w",
             level=logging.DEBUG,
         )
+        logging.getLogger().addHandler(logging.FileHandler(filename=logfile, mode="w"))
         self.ip = ip
         self.pcap = pcap
         self.iface = iface
@@ -138,7 +193,7 @@ class Scapyre:
         if self.delay > 0:
             logging.info("delayed start, waiting for: " + str(self.delay))
             sleep(self.delay)
-        start_time = time.time()
+        start_time = time()
         logging.info("start time: " + str(start_time))
         s = conf.L2socket(iface=self.iface)
         i = 1
@@ -158,7 +213,7 @@ class Scapyre:
                 src = self.map(ip_layer.src)
                 dst = self.map(ip_layer.dst)
 
-                delta = packet.time + self.delay - (time.time() - start_time)
+                delta = packet.time + self.delay - (time - start_time)
                 logging.info("delta: " + str(delta))
 
                 # host is source and sends the current packet to dest
@@ -173,7 +228,7 @@ class Scapyre:
                 # host is destination and waits for the current packet from source
                 elif self.is_related_dst(packet):
                     logging.info(
-                        f"Waiting for packet: src: {src}, dst: {dst}, expected at: {time.strftime('%H:%M:%S', time.gmtime(time.time() + delta))}"
+                        f"Waiting for packet: src: {src}, dst: {dst}, expected at: {strftime('%H:%M:%S', gmtime(time() + delta))}"
                     )
                     # wait for the queue to come up
                     while src not in self.received_packets_queue:
@@ -265,3 +320,64 @@ def map(ip, mapping=None):
     if mapping is None:
         return ip
     return mapping[ip] if ip in mapping else mapping["default"]
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Scapyre")
+
+    parser.add_argument("pcap", type=str, help="PCAP file to replay")
+
+    parser.add_argument(
+        "iface", type=str, help="Interface that will be used for the replay"
+    )
+
+    parser.add_argument(
+        "ip",
+        type=str,
+        help="IP address of a host in the PCAP that will be replayed by this host",
+    )
+
+    parser.add_argument(
+        "--mapping",
+        type=json.loads,
+        default=None,
+        help="Remapping of host IPs in the PCAP and actual host IPs in the replay environment",
+    )
+
+    parser.add_argument(
+        "--enable-deltas",
+        dest="deltas",
+        default=False,
+        action="store_true",
+        help="Respect deltas between two packets",
+    )
+
+    parser.add_argument(
+        "--start-delayed",
+        type=float,
+        dest="delay",
+        default=0.0,
+        help="Wait time in seconds till the replay should start",
+    )
+
+    parser.add_argument(
+        "--logfile",
+        type=str,
+        dest="logfile",
+        default="replay.log",
+        help="File to store the logs of the replay",
+    )
+
+    args = parser.parse_args()
+
+    # Create instance of the replay, respect_delays true cares about the intermediate packet deltas
+    replay = Scapyre(
+        args.ip,
+        args.pcap,
+        args.iface,
+        mapping=args.mapping,
+        respect_packet_deltas=args.deltas,
+        delay=args.delay,
+        logfile=args.logfile,
+    )
+    replay.start()
