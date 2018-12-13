@@ -1,5 +1,7 @@
 FROM python:2-alpine
 
+RUN apk add iptables linux-headers gcc musl-dev libnetfilter_queue-dev libnfnetlink-dev
+
 WORKDIR /usr/src/
 
 COPY requirements.txt .
