@@ -1,6 +1,6 @@
-FROM python:2-alpine
+FROM alpine
 
-RUN apk add iptables linux-headers gcc musl-dev libnetfilter_queue-dev libnfnetlink-dev
+RUN apk update && apk add python2-dev py2-pip iptables linux-headers gcc musl-dev libnetfilter_queue-dev libnfnetlink-dev
 
 WORKDIR /usr/src/
 
