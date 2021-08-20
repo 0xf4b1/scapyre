@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 """
 Create all hosts as docker containers from a PCAP file and do the replay
 """
@@ -6,6 +6,7 @@ import argparse
 import os
 
 from scapy.layers.inet import *
+from scapy.utils import PcapReader
 
 
 def start_docker_replay(pcap):
@@ -28,7 +29,7 @@ def start_docker_replay(pcap):
     print("Starting docker containers")
     for ip in hosts:
         os.system(
-            f"xterm -title {ip} -hold -e docker run -it -v {directory}:/data --network scapyre --ip 10{ip[ip.find('.'):]} scapyre /data/{filename} eth0 {ip} --enable-deltas --mapping '{mapping}' &"
+            f"xterm -title {ip} -hold -e docker run -it -v {directory}:/data --network srp --ip 10{ip[ip.find('.'):]} --cap-add NET_ADMIN scapyre /data/{filename} eth0 {ip} --enable-deltas --mapping '{mapping}' --start-delayed 5 --netfilter &"
         )
 
 

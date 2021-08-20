@@ -1,3 +1,5 @@
+#!/usr/bin/env python2
+
 import argparse
 import json
 import logging
@@ -7,7 +9,8 @@ import threading
 
 from time import sleep, time, gmtime, strftime
 
-from scapy.layers.inet import IP, conf, Ether, ICMP, TCP, UDP, sniff
+from scapy.layers.inet import IP, conf, Ether, ICMP, TCP, UDP
+from scapy.all import sniff
 from scapy.utils import PcapReader
 
 
@@ -106,6 +109,7 @@ class Scapyre:
         self.iface = iface
         self.mapping = mapping
         self.packet_buffer = Queue.Queue(maxsize=buffer_size)
+        self.first_packet_time = None
         self.respect_packet_deltas = respect_packet_deltas
         self.delay = delay
         self.collector = Netfilter(self) if netfilter else Sniffer(self)
@@ -151,9 +155,14 @@ class Scapyre:
         pcap_reader = PcapReader(self.pcap)
         while True:
             if self.packet_buffer.not_full:
-                packet = pcap_reader.read_packet()
+                try:
+                    packet = pcap_reader.read_packet()
+                except:
+                    break
                 if packet is None:
                     break
+                if not self.first_packet_time:
+                    self.first_packet_time = packet.time
                 if has_transport_layer(packet):
                     if self.is_related(packet):
                         self.packet_buffer.put(packet)
@@ -216,7 +225,7 @@ class Scapyre:
                 src = self.map(ip_layer.src)
                 dst = self.map(ip_layer.dst)
 
-                delta = packet.time + self.delay - (time() - start_time)
+                delta = (packet.time - self.first_packet_time) - (time() - start_time)
                 logging.info("delta: " + str(delta))
 
                 # host is source and sends the current packet to dest

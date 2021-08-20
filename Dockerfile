@@ -1,4 +1,4 @@
-FROM alpine
+FROM alpine:3.11
 
 RUN apk update && apk add python2-dev py2-pip iptables linux-headers gcc musl-dev libnetfilter_queue-dev libnfnetlink-dev
 
